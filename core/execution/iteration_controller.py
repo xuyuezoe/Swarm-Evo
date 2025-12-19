@@ -8,6 +8,7 @@ from core.agent.agent_pool import AgentPool
 from core.agent.base_agent import BaseReActAgent
 from core.execution.journal import Journal, Node
 from core.agent.prompt_manager import PromptContext
+from core.memory.local_experience import generate_local_report, select_top_nodes
 from utils.logger_system import log_msg
 
 class IterationController:
@@ -17,13 +18,15 @@ class IterationController:
         task_pipeline: Pipeline,
         journal: Journal,
         config: Any,
-        competition_description: str = ""
+        competition_description: str = "",
+        global_prior: str = "",
     ):
         self.agent_pool = agent_pool
         self.task_pipeline = task_pipeline
         self.journal = journal
         self.config = config
         self.competition_description = competition_description
+        self.global_prior = global_prior
 
         self.current_epoch = 0
         self.start_time = time.time()
@@ -35,6 +38,7 @@ class IterationController:
             log_msg("INFO", f"--- Starting Epoch {self.current_epoch} ---")
             await self.run_epoch()
         
+        self.task_pipeline.finalize_task(current_step=self.current_epoch)
         log_msg("INFO", "Competition loop finished.")
 
     async def run_epoch(self):
@@ -190,12 +194,18 @@ class IterationController:
         solution_code = None
         execution_logs = None
 
+        local_report = ""
+        context_candidates = None
         if task['type'] == 'select':
-            # 获取最近 N=4 个节点作为 Candidates
-            recent_nodes = list(self.journal.nodes.values())[-4:]
-            candidates_data = {n.id: n.code for n in recent_nodes if n.code}
-            # 同时更新 Payload 以便后续传递 ID
+            gene_normalizer = getattr(self.task_pipeline, "gene_normalizer", None)
+            if gene_normalizer:
+                top_nodes = select_top_nodes(self.journal, gene_normalizer, topn=5)
+            else:
+                top_nodes = []
+            candidates_data = {n.id: n.code for n in top_nodes if n.code}
             payload['candidate_ids'] = list(candidates_data.keys())
+            local_report = generate_local_report(top_nodes, gene_normalizer) if gene_normalizer else ""
+            context_candidates = candidates_data
         
         elif task['type'] == 'merge':
             # 从 Journal 获取 Candidates
@@ -216,6 +226,9 @@ class IterationController:
                     solution_code = node.code
                     execution_logs = node.logs # 假设 logs 存在 Node 中
 
+        if context_candidates is None:
+            context_candidates = candidates_data if candidates_data else payload.get('candidates')
+
         return PromptContext(
             workspace_root=self.config.mle_bench_workspace_dir,
             conda_env_name=self.config.conda_env_name,
@@ -229,11 +242,12 @@ class IterationController:
             
             parent_code=payload.get('parent_code'),
             parent_feedback=payload.get('parent_feedback'),
-            candidates=candidates_data if candidates_data else payload.get('candidates'),
+            candidates=context_candidates,
             gene_plan=gene_plan_data if gene_plan_data else payload.get('gene_plan'),
             solution_code=solution_code if solution_code else payload.get('solution_code'),
             execution_logs=execution_logs if execution_logs else payload.get('execution_logs'),
-            
+            global_prior=self.global_prior,
+            local_report=local_report,
             template_name=payload.get('template_name') 
         )
 

@@ -36,6 +36,10 @@ class PromptContext:
     solution_code: Optional[str] = None
     execution_logs: Optional[str] = None
 
+    # Memory injections
+    global_prior: str = ""
+    local_report: str = ""
+
 
 class PromptManager:
     """提示词管理器，负责拼接动态补充信息与模板注入。"""
@@ -107,7 +111,9 @@ class PromptManager:
 
             # Evaluate
             solution_code=context.solution_code,
-            execution_logs=context.execution_logs
+            execution_logs=context.execution_logs,
+            global_prior=context.global_prior,
+            local_report=context.local_report
         )
 
     def _build_history_block(self, history: str) -> str:

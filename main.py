@@ -2,6 +2,8 @@ import asyncio
 import shutil
 import os
 import json
+import time
+import hashlib
 from pathlib import Path
 
 from utils.config import get_config
@@ -12,6 +14,8 @@ from core.agent.agent_pool import AgentPool
 from core.execution.pipeline import Pipeline
 from core.execution.journal import Journal
 from core.execution.iteration_controller import IterationController
+from core.memory.blackboard import GlobalBlackboard
+from utils.task_signature import infer_signature_from_description, signature_to_text
 from utils.logger_system import logger as global_logger 
 
 
@@ -42,11 +46,26 @@ async def main_mle_bench_competition() -> None:
     except FileNotFoundError:
         pass
 
+    signature_json = {}
+    signature_text = ""
+    task_id = ""
+    blackboard = None
+    global_prior = ""
+
     try:
         # 第一阶段：构建workspace
         print("\n[1/7] 构建workspace...")
         description_content = build_workspace(config)
         print(f"✅ workspace 构建成功: {config.mle_bench_workspace_dir}")
+        signature_json = infer_signature_from_description(description_content)
+        signature_text = signature_to_text(signature_json)
+        task_hash = int(hashlib.sha1(signature_text.encode("utf-8")).hexdigest(), 16)
+        task_id = f"task_{task_hash % 1_000_000}"
+        blackboard_path = os.path.join(config.mle_bench_workspace_dir, "blackboard.json")
+        blackboard = GlobalBlackboard.load(blackboard_path)
+        blackboard.register_task(task_id, signature_json, signature_text, created_at=time.time())
+        global_prior = blackboard.summarize_for_prompt(signature_text)
+        log_msg("INFO", f"global_prior_len={len(global_prior)}")
     except Exception as e:
         print(f"workspace 构建失败: {e}")
         return
@@ -124,7 +143,13 @@ async def main_mle_bench_competition() -> None:
         log_msg("INFO", "✅ Journal 初始化完成")
 
         # 2. 创建 Pipeline
-        pipeline = Pipeline(journal)
+        pipeline = Pipeline(
+            journal,
+            blackboard=blackboard,
+            task_id=task_id,
+            signature_json=signature_json,
+            signature_text=signature_text,
+        )
         pipeline.initialize()
         log_msg("INFO", "✅ Pipeline 初始化完成")
 
@@ -134,7 +159,8 @@ async def main_mle_bench_competition() -> None:
             task_pipeline=pipeline,
             journal=journal,
             config=config,
-            competition_description=description_content
+            competition_description=description_content,
+            global_prior=global_prior
         )
 
         # 4. 运行

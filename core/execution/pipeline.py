@@ -2,12 +2,17 @@ import time
 import uuid
 import random
 from threading import Lock
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, TYPE_CHECKING
 
 from core.execution.task_class import Task
 from core.execution.journal import Journal, Node
 from utils.config import get_config
 from utils.logger_system import log_msg
+from core.memory.experience_cache import ExperienceCache
+from core.memory.gene_normalizer import GeneNormalizer
+
+if TYPE_CHECKING:
+    from core.memory.blackboard import GlobalBlackboard
 
 
 class Pipeline:
@@ -18,12 +23,25 @@ class Pipeline:
     支持多线程并发访问。
     """
 
-    def __init__(self, journal: Journal):
+    def __init__(
+        self,
+        journal: Journal,
+        blackboard: "GlobalBlackboard" | None = None,
+        task_id: Optional[str] = None,
+        signature_json: Optional[Dict[str, Any]] = None,
+        signature_text: str = "",
+    ):
         self.lock = Lock()
         self.tasks: List[Task] = []
         self.temporary_storage: Dict[str, Any] = {}
         self.journal = journal
         self.config = get_config()
+        self.blackboard = blackboard
+        self.task_id = task_id or ""
+        self.signature_json = signature_json or {}
+        self.signature_text = signature_text
+        self.cache = ExperienceCache()
+        self.gene_normalizer = GeneNormalizer()
 
     def initialize(self):
         """
@@ -170,6 +188,8 @@ class Pipeline:
                             node.summary = update_data.get('summary', "")
                             node.is_buggy = update_data.get('is_bug', False)
                             node.metadata['review_success'] = update_data.get('agent_success', False)
+                            gene_values = self.gene_normalizer.discretize(node.genes or {})
+                            self.cache.add_review(node, gene_values)
                             log_msg("INFO", f"Pipeline updated Node {target_id} with score {node.score}")
                         else:
                             log_msg("WARNING", f"Review target node {target_id} not found.")
@@ -232,3 +252,24 @@ class Pipeline:
         """
         with self.lock:
             self._prepend_task_internal(task)
+
+    def finalize_task(self, current_step: int) -> None:
+        """
+        Flush the experience cache into the global blackboard.
+        """
+        if not self.blackboard or not self.task_id:
+            return
+        positives, negatives = self.cache.flush()
+        log_msg(
+            "INFO",
+            f"Flushing experience cache: positives={len(positives)}, negatives={len(negatives)}",
+        )
+        self.blackboard.update_from_summaries(
+            self.task_id,
+            self.signature_json,
+            self.signature_text,
+            positives,
+            negatives,
+            current_step=current_step,
+        )
+        self.blackboard.save()
